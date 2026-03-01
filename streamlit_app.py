@@ -14,15 +14,25 @@
 # limitations under the License.
 
 import streamlit as st
-import yfinance as yf
 import pandas as pd
 import altair as alt
+import datetime
+from psx import stocks
+from pathlib import Path
 
 st.set_page_config(
     page_title="Stock peer analysis dashboard",
     page_icon=":chart_with_upwards_trend:",
     layout="wide",
 )
+
+# Load symbols from data folder
+data_dir = Path(__file__).parent / "data"
+if (data_dir / "stocks.csv").exists():
+    STOCKS_DF = pd.read_csv(data_dir / "stocks.csv")
+    STOCKS = STOCKS_DF["symbol"].tolist()
+else:
+    STOCKS = []
 
 """
 # :material/query_stats: Stock peer analysis
@@ -35,105 +45,7 @@ Easily compare stocks against others in their peer group.
 cols = st.columns([1, 3])
 # Will declare right cell later to avoid showing it when no data.
 
-STOCKS = [
-    "AAPL",
-    "ABBV",
-    "ACN",
-    "ADBE",
-    "ADP",
-    "AMD",
-    "AMGN",
-    "AMT",
-    "AMZN",
-    "APD",
-    "AVGO",
-    "AXP",
-    "BA",
-    "BK",
-    "BKNG",
-    "BMY",
-    "BRK.B",
-    "BSX",
-    "C",
-    "CAT",
-    "CI",
-    "CL",
-    "CMCSA",
-    "COST",
-    "CRM",
-    "CSCO",
-    "CVX",
-    "DE",
-    "DHR",
-    "DIS",
-    "DUK",
-    "ELV",
-    "EOG",
-    "EQR",
-    "FDX",
-    "GD",
-    "GE",
-    "GILD",
-    "GOOG",
-    "GOOGL",
-    "HD",
-    "HON",
-    "HUM",
-    "IBM",
-    "ICE",
-    "INTC",
-    "ISRG",
-    "JNJ",
-    "JPM",
-    "KO",
-    "LIN",
-    "LLY",
-    "LMT",
-    "LOW",
-    "MA",
-    "MCD",
-    "MDLZ",
-    "META",
-    "MMC",
-    "MO",
-    "MRK",
-    "MSFT",
-    "NEE",
-    "NFLX",
-    "NKE",
-    "NOW",
-    "NVDA",
-    "ORCL",
-    "PEP",
-    "PFE",
-    "PG",
-    "PLD",
-    "PM",
-    "PSA",
-    "REGN",
-    "RTX",
-    "SBUX",
-    "SCHW",
-    "SLB",
-    "SO",
-    "SPGI",
-    "T",
-    "TJX",
-    "TMO",
-    "TSLA",
-    "TXN",
-    "UNH",
-    "UNP",
-    "UPS",
-    "V",
-    "VZ",
-    "WFC",
-    "WM",
-    "WMT",
-    "XOM",
-]
-
-DEFAULT_STOCKS = ["AAPL", "MSFT", "GOOGL", "NVDA", "AMZN", "TSLA", "META"]
+DEFAULT_STOCKS = ["OGDC", "PPL", "LUCK", "HUBC", "BAFL", "UBL"]
 
 
 def stocks_to_str(stocks):
@@ -206,21 +118,65 @@ right_cell = cols[1].container(
 )
 
 
-@st.cache_resource(show_spinner=False, ttl="6h")
-def load_data(tickers, period):
-    tickers_obj = yf.Tickers(tickers)
-    data = tickers_obj.history(period=period)
-    if data is None:
-        raise RuntimeError("YFinance returned no data.")
-    return data["Close"]
+@st.cache_data(persist=True, show_spinner=False)
+def fetch_stock(ticker, start_date, end_date):
+    """Fetch and cache data for a single stock."""
+    try:
+        df = stocks(ticker, start=start_date, end=end_date)
+        if df is not None and len(df) > 0:
+            return df["Close"]
+    except Exception:
+        pass
+    return None
+
+
+def load_data(tickers, period, progress_bar):
+    """Load data with progress bar."""
+    # Convert period to date range
+    end_date = datetime.date.today()
+    if period == "1mo":
+        start_date = end_date - datetime.timedelta(days=30)
+    elif period == "3mo":
+        start_date = end_date - datetime.timedelta(days=90)
+    elif period == "6mo":
+        start_date = end_date - datetime.timedelta(days=180)
+    elif period == "1y":
+        start_date = end_date - datetime.timedelta(days=365)
+    elif period == "5y":
+        start_date = end_date - datetime.timedelta(days=365 * 5)
+    elif period == "10y":
+        start_date = end_date - datetime.timedelta(days=365 * 10)
+    elif period == "20y":
+        start_date = end_date - datetime.timedelta(days=365 * 20)
+    else:
+        start_date = end_date - datetime.timedelta(days=180)
+
+    # Fetch data for each ticker with progress
+    all_data = {}
+    for i, ticker in enumerate(tickers):
+        progress_bar.progress(
+            (i + 1) / len(tickers), text=f"Fetching data for {ticker}"
+        )
+        close_data = fetch_stock(ticker, start_date, end_date)
+        if close_data is not None:
+            all_data[ticker] = close_data
+        else:
+            st.warning(f"No data for {ticker}")
+
+    if not all_data:
+        raise RuntimeError("No data returned from PSX.")
+
+    return pd.DataFrame(all_data)
 
 
 # Load the data
 try:
-    data = load_data(tickers, horizon_map[horizon])
-except yf.exceptions.YFRateLimitError as e:
-    st.warning("YFinance is rate-limiting us :(\nTry again later.")
-    load_data.clear()  # Remove the bad cache entry.
+    progress_bar = st.progress(0, text="Loading data...")
+    data = load_data(tickers, horizon_map[horizon], progress_bar)
+    progress_bar.empty()
+except Exception as e:
+    st.warning(f"Error loading data: {e}")
+    fetch_stock.clear()
     st.stop()
 
 empty_columns = data.columns[data.isna().all()].tolist()
